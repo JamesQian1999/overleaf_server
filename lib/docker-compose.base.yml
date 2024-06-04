@@ -1,0 +1,22 @@
+---
+version: '2.2'
+services:
+
+    sharelatex:
+        restart: always
+        image: "jamesqian1999/sharelatex:latest"
+        container_name: sharelatex
+        volumes:
+            - "${OVERLEAF_DATA_PATH}:${OVERLEAF_IN_CONTAINER_DATA_PATH}"
+        ports:
+            - "0.0.0.0:85:80"
+        environment:
+          GIT_BRIDGE_ENABLED: "${GIT_BRIDGE_ENABLED}"
+          GIT_BRIDGE_HOST: "git-bridge"
+          GIT_BRIDGE_PORT: "8000"
+          REDIS_HOST: "${REDIS_HOST}"
+          REDIS_PORT: "${REDIS_PORT}"
+          V1_HISTORY_URL: "http://sharelatex:3100/api"
+        env_file:
+            - ../config/variables.env
+        stop_grace_period: 60s

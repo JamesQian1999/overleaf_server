@@ -1,0 +1,215 @@
+#! /usr/bin/env bash
+# shellcheck source-path=..
+
+set -euo pipefail
+
+#### Detect Toolkit Project Root ####
+# if realpath is not available, create a semi-equivalent function
+command -v realpath >/dev/null 2>&1 || realpath() {
+  [[ $1 = /* ]] && echo "$1" || echo "$PWD/${1#./}"
+}
+SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
+TOOLKIT_ROOT="$(realpath "$SCRIPT_DIR/..")"
+if [[ ! -d "$TOOLKIT_ROOT/bin" ]] || [[ ! -d "$TOOLKIT_ROOT/config" ]]; then
+  echo "ERROR: could not find root of overleaf-toolkit project (inferred project root as '$TOOLKIT_ROOT')"
+  exit 1
+fi
+
+source "$TOOLKIT_ROOT/lib/shared-functions.sh"
+
+function build_environment() {
+  canonicalize_data_paths
+  set_base_vars
+
+  if [[ $REDIS_ENABLED == "true" ]]; then
+    set_redis_vars
+  fi
+  if [[ $MONGO_ENABLED == "true" ]]; then
+    set_mongo_vars
+  fi
+  if [[ $SIBLING_CONTAINERS_ENABLED == "true" ]]; then
+    set_sibling_containers_vars
+  fi
+  if [[ $NGINX_ENABLED == "true" ]]; then
+    set_nginx_vars
+  fi
+  if [[ $GIT_BRIDGE_ENABLED == "true" ]]; then
+    set_git_bridge_vars
+  fi
+
+  # Include docker-compose.override.yml if it is present
+  if [[ -f "$TOOLKIT_ROOT/config/docker-compose.override.yml" ]]; then
+    DOCKER_COMPOSE_FLAGS+=(-f "$TOOLKIT_ROOT/config/docker-compose.override.yml")
+  fi
+}
+
+function canonicalize_data_paths() {
+  OVERLEAF_DATA_PATH=$(cd "$TOOLKIT_ROOT"; realpath "$OVERLEAF_DATA_PATH")
+  MONGO_DATA_PATH=$(cd "$TOOLKIT_ROOT"; realpath "$MONGO_DATA_PATH")
+  REDIS_DATA_PATH=$(cd "$TOOLKIT_ROOT"; realpath "$REDIS_DATA_PATH")
+  GIT_BRIDGE_DATA_PATH=$(cd "$TOOLKIT_ROOT"; realpath "$GIT_BRIDGE_DATA_PATH")
+}
+
+# Set environment variables for docker-compose.base.yml
+function set_base_vars() {
+  DOCKER_COMPOSE_FLAGS=(-f "$TOOLKIT_ROOT/lib/docker-compose.base.yml")
+  if [[ "$IMAGE_VERSION_MAJOR" -lt 5 ]]; then
+    DOCKER_COMPOSE_FLAGS+=(-f "$TOOLKIT_ROOT/lib/docker-compose.vars-legacy.yml")
+  else
+    DOCKER_COMPOSE_FLAGS+=(-f "$TOOLKIT_ROOT/lib/docker-compose.vars.yml")
+  fi
+
+  local image_name
+  if [[ -n ${OVERLEAF_IMAGE_NAME:-} ]]; then
+    image_name="$OVERLEAF_IMAGE_NAME"
+  elif [[ $SERVER_PRO == "true" ]]; then
+    image_name="quay.io/sharelatex/sharelatex-pro"
+  else
+    image_name="sharelatex/sharelatex"
+  fi
+  export IMAGE="$image_name:$IMAGE_VERSION"
+
+  if [[ ${OVERLEAF_LISTEN_IP:-null} == "null" ]];
+  then
+    echo "WARNING: the value of OVERLEAF_LISTEN_IP is not set in config/overleaf.rc. This value must be set to the public IP address for direct container access. Defaulting to 0.0.0.0" >&2
+    OVERLEAF_LISTEN_IP="0.0.0.0"
+  fi
+  export OVERLEAF_LISTEN_IP
+
+  if [[ $SERVER_PRO != "true" || $IMAGE_VERSION_MAJOR -lt 4 ]]; then
+    # Force git bridge to be disabled if not ServerPro >= 4
+    GIT_BRIDGE_ENABLED=false
+  fi
+
+  HAS_WEB_API=false
+  if [[ $IMAGE_VERSION_MAJOR -gt 4 ]]; then
+    HAS_WEB_API=true
+  elif [[ $IMAGE_VERSION_MAJOR == 4 && $IMAGE_VERSION_MINOR -ge 2 ]]; then
+    HAS_WEB_API=true
+  fi
+
+  OVERLEAF_IN_CONTAINER_DATA_PATH=/var/lib/overleaf
+  if [[ "$IMAGE_VERSION_MAJOR" -lt 5 ]]; then
+    OVERLEAF_IN_CONTAINER_DATA_PATH=/var/lib/sharelatex
+  fi
+
+  export GIT_BRIDGE_ENABLED
+  export MONGO_URL
+  export REDIS_HOST
+  export REDIS_PORT
+  export OVERLEAF_DATA_PATH
+  export OVERLEAF_PORT
+  export OVERLEAF_IN_CONTAINER_DATA_PATH
+
+}
+
+# Set environment variables for docker-compose.redis.yml
+function set_redis_vars() {
+  DOCKER_COMPOSE_FLAGS+=(-f "$TOOLKIT_ROOT/lib/docker-compose.redis.yml")
+  export REDIS_IMAGE
+  export REDIS_DATA_PATH
+}
+
+# Set environment variables for docker-compose.mongo.yml
+function set_mongo_vars() {
+  DOCKER_COMPOSE_FLAGS+=(-f "$TOOLKIT_ROOT/lib/docker-compose.mongo.yml")
+
+  if [[ $MONGO_ENABLED == "true" && $IMAGE_VERSION_MAJOR -ge 4 ]]; then
+    MONGO_ARGS="--replSet overleaf"
+  else
+    MONGO_ARGS=""
+  fi
+  export MONGO_ARGS
+
+  export MONGO_DATA_PATH
+  export MONGO_IMAGE
+}
+
+# Set environment variables for docker-compose.sibling-containers.yml
+function set_sibling_containers_vars() {
+  DOCKER_COMPOSE_FLAGS+=(-f "$TOOLKIT_ROOT/lib/docker-compose.sibling-containers.yml")
+  export DOCKER_SOCKET_PATH
+  export OVERLEAF_DATA_PATH
+}
+
+# Set environment variables for docker-compose.nginx.yml
+function set_nginx_vars() {
+  DOCKER_COMPOSE_FLAGS+=(-f "$TOOLKIT_ROOT/lib/docker-compose.nginx.yml")
+
+  if [[ -n ${TLS_PRIVATE_KEY_PATH-} ]]; then
+    TLS_PRIVATE_KEY_PATH=$(cd "$TOOLKIT_ROOT"; realpath "$TLS_PRIVATE_KEY_PATH")
+  fi
+  if [[ -n ${TLS_CERTIFICATE_PATH-} ]]; then
+    TLS_CERTIFICATE_PATH=$(cd "$TOOLKIT_ROOT"; realpath "$TLS_CERTIFICATE_PATH")
+  fi
+  if [[ -n ${NGINX_CONFIG_PATH-} ]]; then
+    NGINX_CONFIG_PATH=$(cd "$TOOLKIT_ROOT"; realpath "$NGINX_CONFIG_PATH")
+  fi
+
+  export NGINX_CONFIG_PATH
+  export NGINX_IMAGE
+  export NGINX_HTTP_PORT
+  export NGINX_HTTP_LISTEN_IP
+  export NGINX_TLS_LISTEN_IP
+  export TLS_CERTIFICATE_PATH
+  export TLS_PORT
+  export TLS_PRIVATE_KEY_PATH
+}
+
+# Set environment variables for docker-compose.git-bridge.yml
+function set_git_bridge_vars() {
+  local image_name
+  if [[ -n ${GIT_BRIDGE_IMAGE:-} ]]; then
+    image_name="$GIT_BRIDGE_IMAGE"
+  else
+    image_name="quay.io/sharelatex/git-bridge:$IMAGE_VERSION"
+  fi
+
+  GIT_BRIDGE_API_BASE_URL="http://sharelatex/api/v0/"
+  if [[ $HAS_WEB_API == "true" ]]; then
+    GIT_BRIDGE_API_BASE_URL="http://sharelatex:3000/api/v0/"
+  fi
+
+  DOCKER_COMPOSE_FLAGS+=(-f "$TOOLKIT_ROOT/lib/docker-compose.git-bridge.yml")
+  export GIT_BRIDGE_API_BASE_URL
+  export GIT_BRIDGE_IMAGE=${image_name}
+  export GIT_BRIDGE_DATA_PATH
+  export GIT_BRIDGE_LOG_LEVEL
+}
+
+function print_debug_info() {
+  if [[ ${RC_DEBUG:-null} != "null" ]]; then
+    echo ">>>>>>VARS>>>>>>"
+    echo "$(set -o posix; set)" # print all vars
+    echo "IMAGE_VERSION=$IMAGE_VERSION"
+    echo "<<<<<<<<<<<<<<<<"
+    echo ">>>>COMPOSE-ARGS>>>>"
+    echo "-p $PROJECT_NAME"
+    echo "${DOCKER_COMPOSE_FLAGS[@]}"
+    echo "$@"
+    echo "<<<<<<<<<<<<<<<<<<<<"
+  fi
+}
+
+function docker_compose() {
+  local flags=(-p "$PROJECT_NAME" "${DOCKER_COMPOSE_FLAGS[@]}" "$@")
+  if docker compose version >/dev/null 2>&1; then
+    # Docker compose v2 is available
+    exec docker compose "${flags[@]}"
+  elif command -v docker-compose >/dev/null; then
+    # Fall back to docker-compose v1
+    exec docker-compose "${flags[@]}"
+  else
+    echo "ERROR: Could not find Docker Compose." >&2
+    exit 1
+  fi
+}
+
+read_image_version
+read_config
+check_retracted_version
+check_sharelatex_env_vars
+build_environment
+print_debug_info "$@"
+docker_compose "$@"
