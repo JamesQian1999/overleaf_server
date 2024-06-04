@@ -16,7 +16,7 @@ available on your system.
 First, let's clone this git repository to your machine:
 
 ```sh
-$ git clone https://github.com/overleaf/toolkit.git ./overleaf-toolkit
+$ git clone https://github.com/JamesQian1999/overleaf_server.git ./overleaf-toolkit
 ```
 
 Next let's move into this directory:
